@@ -1,0 +1,21 @@
+﻿ccxt==4.4.100
+pandas==2.3.0
+numpy==2.4.2
+ta==0.11.0
+scikit-learn==1.6.0
+python-dotenv==1.1.0
+streamlit==1.40.0
+plotly==6.3.1
+websockets==14.0
+aiohttp==3.11.0
+loguru==0.7.3
+aio-pika==9.4.3
+feedparser==6.0.11
+
+# Ray + RLlib
+ray[rllib]==2.40.0
+gymnasium==1.0.0
+torch==2.6.0
+tensorboard==2.18.0
+
+# Удалено: stable-baselines3, hmmlearn (если не используется)
