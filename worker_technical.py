@@ -258,6 +258,7 @@ def _compute_enhanced_indicators(df: pd.DataFrame) -> dict:
 async def process_task(task: dict) -> dict:
     correlation_id = task.get('correlation_id', 'unknown')
     log = logger.bind(correlation_id=correlation_id)
+    log.info(f"🔥 Technical received task for {task.get('symbol', 'unknown')}")
 
     df_dict = task['df']
     regime = task.get('regime', 'Unknown')

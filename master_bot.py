@@ -17,7 +17,6 @@ from ai_agents import AITradingOrchestrator, AgentAnalysis
 from ai_agents import close_rabbitmq
 from telegram_notifier import TelegramNotifier
 
-# Ray всё ещё нужен для воркеров, оставляем инициализацию
 import ray
 
 class TradingBot:
@@ -33,29 +32,22 @@ class TradingBot:
         self.ai_orchestrator = AITradingOrchestrator()
         self.use_ai = True
         self.running = False
-        self.positions = defaultdict(float)          # symbol -> size
-        self.open_positions = {}                     # symbol -> {'entry_price': float, 'trade_id': int}
+        self.positions = defaultdict(float)
+        self.open_positions = {}
         self.trade_history = []
         self.current_symbols = []
         self.TAKER_FEE = 0.00055
 
-        # Online learning settings
         self.last_training_time = None
         self.min_new_experiences_for_training = config.TRAINING_MIN_EXPERIENCES
         self.training_interval_hours = getattr(config, 'TRAINING_INTERVAL_HOURS', 24)
         self.model_path = "models/ppo_trader.zip"
         self.temp_model_path = "models/ppo_trader_new.zip"
 
-        # Trailing stop tracking (optional)
-        self.trailing_stops = {}  # symbol -> {'entry_price': float, 'best_price': float, 'trailing_order_id': str}
-
-        # store previous positions to detect external closures
+        self.trailing_stops = {}
         self.previous_positions = {}
-
-        # флаг для предотвращения повторного пересчёта весов
         self.last_recalc_count = 0
 
-        # Telegram notifier
         self.telegram = None
         if config.TELEGRAM_BOT_TOKEN and config.TELEGRAM_CHAT_ID:
             self.telegram = TelegramNotifier(config.TELEGRAM_BOT_TOKEN, config.TELEGRAM_CHAT_ID)
@@ -63,19 +55,19 @@ class TradingBot:
 
     def _play_trade_sound(self):
         try:
-            print('\a', end='', flush=True)  # звуковой сигнал
+            print('\a', end='', flush=True)
         except Exception as e:
             logger.debug(f"Sound notification failed: {e}")
 
     async def initialize(self):
         logger.info("🚀 Initializing Bybit Futures Bot with AI...")
         self.client = BybitClient()
-        
         if hasattr(config, 'TRADE_TOP_VOLUME_COINS') and config.TRADE_TOP_VOLUME_COINS:
             self.current_symbols = await self.scanner.get_dynamic_symbols()
         else:
             self.current_symbols = config.SYMBOLS
-        
+        # Принудительно убираем ADA (временное решение)
+        self.current_symbols = [s for s in self.current_symbols if s != "ADA/USDT"]
         logger.info(f"📊 Trading {len(self.current_symbols)} symbols")
         for symbol in self.current_symbols:
             data = await self.client.fetch_ohlcv(symbol, '1h', limit=1000)
@@ -83,12 +75,9 @@ class TradingBot:
                 self.regime_detector.fit(data)
                 regime = self.regime_detector.predict_regime(data)
                 logger.info(f"📊 {symbol} regime: {self.regime_detector.get_regime_name(regime)}")
-
-        # Инициализация Ray (если ещё не инициализирован)
         if not ray.is_initialized():
             ray.init(ignore_reinit_error=True)
             logger.info("✅ Ray initialized (for workers)")
-
         logger.success("✅ Initialization complete")
 
     def calculate_pnl_with_fees(self, entry_price, exit_price, amount, position_type):
@@ -109,46 +98,73 @@ class TradingBot:
 
     async def analyze_symbol(self, symbol: str) -> Optional[Dict]:
         try:
+            logger.info(f"START analyze_symbol for {symbol}")
             data = await self.client.fetch_multiple_timeframes(symbol)
             if not data:
+                logger.warning(f"No data for {symbol}")
                 return None
+            logger.info(f"Data fetched for {symbol}, keys: {list(data.keys())}")
             regime = 0
             regime_name = "Unknown"
             if '1h' in data:
                 regime = self.regime_detector.predict_regime(data['1h'])
                 regime_name = self.regime_detector.get_regime_name(regime)
+                logger.info(f"Regime for {symbol}: {regime_name}")
             tf_data = data.get('1m', data.get('5m', data.get('15m')))
             if tf_data is None:
+                logger.warning(f"No suitable timeframe data for {symbol}")
                 return None
-            
+            logger.info(f"Using timeframe data for {symbol}, shape: {tf_data.shape if hasattr(tf_data, 'shape') else 'unknown'}")
+            logger.info(f"tf_data type: {type(tf_data)}, shape: {tf_data.shape if hasattr(tf_data, 'shape') else 'no shape'}")
+
             signals = []
             for strategy in self.strategies.values():
-                sig = strategy.generate_signal(symbol, tf_data)
-                if sig:
-                    signals.append(sig)
-            
-            channel_signal = self.channel_detector.get_trading_signal(tf_data)
-            if channel_signal['signal'] != config.SIGNAL_HOLD:
-                class DummySignal:
-                    pass
-                ds = DummySignal()
-                ds.signal = channel_signal['signal']
-                ds.confidence = channel_signal['confidence']
-                ds.reasons = [f"Channel {channel_signal['action']}"]
-                ds.price = tf_data['close'].iloc[-1]
-                ds.strategy_name = "ChannelDetector"
-                signals.append(ds)
-            
+                try:
+                    sig = strategy.generate_signal(symbol, tf_data)
+                    if sig:
+                        signals.append(sig)
+                except Exception as e:
+                    logger.error(f"Error in generate_signal for {symbol}: {e}", exc_info=True)
+
+            try:
+                channel_signal = self.channel_detector.get_trading_signal(tf_data)
+                if channel_signal['signal'] != config.SIGNAL_HOLD:
+                    class DummySignal:
+                        pass
+                    ds = DummySignal()
+                    ds.signal = channel_signal['signal']
+                    ds.confidence = channel_signal['confidence']
+                    ds.reasons = [f"Channel {channel_signal['action']}"]
+                    ds.price = tf_data['close'].iloc[-1]
+                    ds.strategy_name = "ChannelDetector"
+                    signals.append(ds)
+                    logger.info(f"Channel signal added for {symbol}: {channel_signal['signal']}")
+            except Exception as e:
+                logger.error(f"Error in channel detector for {symbol}: {e}", exc_info=True)
+
             ai_analyses = []
             ai_signal = config.SIGNAL_HOLD
             ai_confidence = 0.0
             ai_reasoning = []
             if self.use_ai:
+                logger.info(f"Fetching balance for {symbol}")
                 balance = await self.client.get_account_balance()
+                logger.info(f"Balance fetched for {symbol}: {balance}")
+                logger.info(f"Balance fetched, now calling analyze_market for {symbol}")
+                logger.info(f"BALANCE FETCHED, NEXT STEP IS analyze_market for {symbol}")
                 current_position = self.positions.get(symbol, 0)
+                logger.info(f"Current position for {symbol}: {current_position}")
+                logger.info(f"Calling analyze_market for {symbol}")
+                logger.info(f"🔥🔥🔥 About to call analyze_market for {symbol} 🔥🔥🔥")
                 ai_result = await self.ai_orchestrator.analyze_market(
-                    tf_data, balance.get('USDT', 0), regime=regime_name, current_position=current_position
+                    symbol,
+                    tf_data,
+                    balance.get('USDT', 0),
+                    regime=regime_name,
+                    current_position=current_position
                 )
+                logger.info(f"AFTER analyze_market call for {symbol}")
+                logger.info(f"analyze_market returned for {symbol}: {ai_result}")
                 ai_analyses = ai_result.get('analyses', [])
                 ai_signal = ai_result['signal']
                 ai_confidence = ai_result['confidence']
@@ -163,32 +179,36 @@ class TradingBot:
                     ais.price = tf_data['close'].iloc[-1]
                     ais.strategy_name = "AI Consensus"
                     signals.append(ais)
-            
-            if not signals:
+                    logger.info(f"AI signal added for {symbol}: {ai_signal}")
+            else:
+                logger.info("AI disabled")
+
+            if not signals and not self.use_ai:
+                logger.warning(f"No signals at all for {symbol}")
                 return None
-            
+
             weighted_signal = sum(s.signal * s.confidence for s in signals) / len(signals)
             avg_confidence = sum(s.confidence for s in signals) / len(signals)
             all_reasons = list(set(r for s in signals for r in (s.reasons if hasattr(s, 'reasons') else [])))[:5]
             price = await self.client.get_last_price(symbol) or signals[0].price
-            
+
             final_signal = config.SIGNAL_HOLD
             final_confidence = 0.0
             final_reasons = []
-            
+
             if ai_signal != config.SIGNAL_HOLD:
                 final_signal = ai_signal
                 final_confidence = ai_confidence
                 final_reasons = ai_reasoning
                 logger.info(f"🤖 AI signal for {symbol}: {final_signal} with confidence {final_confidence:.2f}")
             else:
-                # AI не дал сигнала – не торгуем
                 logger.info(f"⏸️ No trade: AI HOLD for {symbol}")
                 return None
-            
+
             if final_signal == config.SIGNAL_HOLD:
                 return None
-            
+
+            logger.info(f"Returning analysis for {symbol}")
             return {
                 'symbol': symbol,
                 'timestamp': datetime.now(),
@@ -202,7 +222,7 @@ class TradingBot:
                 'tf_data': tf_data
             }
         except Exception as e:
-            logger.error(f"Analyze error {symbol}: {e}")
+            logger.error(f"Analyze error {symbol}: {e}", exc_info=True)
             return None
 
     async def check_daily_loss(self) -> bool:
@@ -231,11 +251,9 @@ class TradingBot:
     async def _update_trailing_stops(self):
         if not hasattr(config, 'USE_TRAILING_STOP') or not config.USE_TRAILING_STOP:
             return
-
         for symbol, position_size in self.positions.items():
             if position_size == 0:
                 continue
-
             current_price = await self.client.get_last_price(symbol)
             if not current_price:
                 try:
@@ -247,18 +265,15 @@ class TradingBot:
                         continue
                 except Exception:
                     continue
-
             is_long = position_size > 0
             entry_info = self.open_positions.get(symbol)
             if not entry_info:
                 continue
             entry_price = entry_info['entry_price']
-
             if is_long:
                 profit_pct = (current_price - entry_price) / entry_price * 100
             else:
                 profit_pct = (entry_price - current_price) / entry_price * 100
-
             trailing_data = self.trailing_stops.get(symbol)
             if trailing_data is None:
                 if profit_pct >= config.TRAILING_STOP_ACTIVATION:
@@ -289,7 +304,6 @@ class TradingBot:
                 logger.warning(f"Not enough data for observation of {symbol}")
                 return
             window = df_features.iloc[-60:][['close', 'volume', 'rsi', 'macd', 'bb_position', 'volatility']].values
-            # Добавляем 3 нуля для макро-признаков (пока всегда 0)
             obs = np.concatenate([window.flatten(), np.zeros(3)]).astype(np.float32)
             obs_blob = pickle.dumps(obs)
             cursor = self.trading_memory.conn.cursor()
@@ -349,11 +363,9 @@ class TradingBot:
         if len(replay_data) < self.min_new_experiences_for_training:
             logger.warning("Not enough data in replay buffer, skipping training")
             return
-
         temp_data_path = "temp_training_data.pkl"
         replay_data.to_pickle(temp_data_path)
         logger.info(f"Saved {len(replay_data)} experiences to {temp_data_path}")
-
         cmd = [
             "python", "train_rllib.py",
             "--data", temp_data_path,
@@ -381,31 +393,26 @@ class TradingBot:
         try:
             sl_mult = getattr(config, 'DEFAULT_SL_MULT', 1.5)
             tp_mult = getattr(config, 'DEFAULT_TP_MULT', 3.0)
-
             atr_series = calculate_atr(df, period=14)
             if atr_series is None or atr_series.empty:
                 logger.warning(f"ATR calculation failed for {symbol}, fallback to fixed percentages")
                 return self._fallback_tp_sl(signal, entry_price)
-
             latest_atr = atr_series.iloc[-1]
             if pd.isna(latest_atr) or latest_atr <= 0:
                 logger.warning(f"Invalid ATR value ({latest_atr}) for {symbol}, fallback to fixed percentages")
                 return self._fallback_tp_sl(signal, entry_price)
-
             if ai_analyses:
                 for a in ai_analyses:
                     if a.agent_name == "Risk Manager" and 'recommended_sl_mult' in a.data:
                         sl_mult = a.data['recommended_sl_mult']
                     if a.agent_name == "Technical Analyst" and 'recommended_tp_mult' in a.data:
                         tp_mult = a.data['recommended_tp_mult']
-
             if signal == config.SIGNAL_BUY:
                 sl_price = entry_price - latest_atr * sl_mult
                 tp_price = entry_price + latest_atr * tp_mult
             else:
                 sl_price = entry_price + latest_atr * sl_mult
                 tp_price = entry_price - latest_atr * tp_mult
-
             min_gap = max(latest_atr * 0.3, 0.0001)
             if signal == config.SIGNAL_SELL:
                 if sl_price <= entry_price:
@@ -417,19 +424,15 @@ class TradingBot:
                     sl_price = entry_price - min_gap
                 if tp_price <= entry_price:
                     tp_price = entry_price + min_gap
-
             min_abs_dist = entry_price * 0.005
             if abs(sl_price - entry_price) < min_abs_dist:
                 sl_price = entry_price - min_abs_dist if signal == config.SIGNAL_BUY else entry_price + min_abs_dist
             if abs(tp_price - entry_price) < min_abs_dist:
                 tp_price = entry_price + min_abs_dist if signal == config.SIGNAL_BUY else entry_price - min_abs_dist
-
             sl_price = round(sl_price, 4)
             tp_price = round(tp_price, 4)
-
             logger.debug(f"Dynamic TP/SL for {symbol}: ATR={latest_atr:.4f}, SL={sl_price}, TP={tp_price}")
             return tp_price, sl_price
-
         except Exception as e:
             logger.error(f"Error in dynamic TP/SL calculation: {e}")
             return None, None
@@ -452,7 +455,7 @@ class TradingBot:
     async def execute_signal(self, analysis: Dict):
         if analysis['final_signal'] == config.SIGNAL_HOLD:
             return
-
+        logger.info(f"Executing signal for {analysis['symbol']}")
         symbol = analysis['symbol']
         signal = analysis['final_signal']
         confidence = analysis['confidence']
@@ -463,9 +466,11 @@ class TradingBot:
 
         if regime in ["Trending Bear"] and signal == config.SIGNAL_BUY:
             logger.info(f"⛔ Skipping LONG in {regime}")
+            logger.info(f"Signal execution completed for {analysis['symbol']} (skipped LONG)")
             return
         if regime in ["Trending Bull"] and signal == config.SIGNAL_SELL:
             logger.info(f"⛔ Skipping SHORT in {regime}")
+            logger.info(f"Signal execution completed for {analysis['symbol']} (skipped SHORT)")
             return
 
         existing_position = 0
@@ -483,6 +488,7 @@ class TradingBot:
 
         if (signal == config.SIGNAL_SELL and existing_position < 0) or (signal == config.SIGNAL_BUY and existing_position > 0):
             logger.info(f"⏭️ Already have {'SHORT' if existing_position<0 else 'LONG'} on {symbol}, skipping")
+            logger.info(f"Signal execution completed for {analysis['symbol']} (already in position)")
             return
 
         balance = await self.client.get_account_balance()
@@ -501,10 +507,12 @@ class TradingBot:
 
         if margin < config.MIN_TRADE_AMOUNT_USDT:
             logger.info(f"💰 Margin ${margin:.2f} below minimum ${config.MIN_TRADE_AMOUNT_USDT}")
+            logger.info(f"Signal execution completed for {analysis['symbol']} (margin too low)")
             return
 
         if usdt_balance < margin:
             logger.warning(f"Insufficient balance: have ${usdt_balance:.2f}, need ${margin:.2f}")
+            logger.info(f"Signal execution completed for {analysis['symbol']} (insufficient balance)")
             return
 
         await self.client.set_leverage(symbol, config.LEVERAGE)
@@ -514,16 +522,17 @@ class TradingBot:
 
         if contracts == 0:
             logger.info(f"⚠️ Calculated contracts = 0, skipping")
+            logger.info(f"Signal execution completed for {analysis['symbol']} (zero contracts)")
             return
 
         actual_margin = contracts * price / config.LEVERAGE
         if actual_margin > usdt_balance * 1.05:
             logger.warning(f"Actual margin ${actual_margin:.2f} > balance ${usdt_balance:.2f}, skipping")
+            logger.info(f"Signal execution completed for {analysis['symbol']} (margin exceeds balance)")
             return
 
         logger.debug(f"Target notional: ${target_notional:.2f}, contracts: {contracts}, actual margin: ${actual_margin:.2f}")
 
-        # ---- Close opposite position ----
         if signal == config.SIGNAL_SELL and existing_position > 0:
             logger.info(f"🔚 Closing LONG {symbol}")
             order = await self.client.create_order(symbol, 'sell', existing_position, reduce_only=True)
@@ -559,6 +568,7 @@ class TradingBot:
                         'regime': regime,
                         'reasons': ', '.join(analysis['reasons'])
                     })
+            logger.info(f"Signal execution completed for {analysis['symbol']} (closed long)")
             return
 
         if signal == config.SIGNAL_BUY and existing_position < 0:
@@ -596,13 +606,14 @@ class TradingBot:
                         'regime': regime,
                         'reasons': ', '.join(analysis['reasons'])
                     })
+            logger.info(f"Signal execution completed for {analysis['symbol']} (closed short)")
             return
 
-        # ---- Open new position ----
         bias = 'bullish' if signal == config.SIGNAL_BUY else 'bearish'
         consistency = self.trading_memory.check_consistency(symbol, bias, price)
         if not consistency['consistent']:
             logger.warning(f"⏸️ Memory block: {consistency['reason']} – skipping trade")
+            logger.info(f"Signal execution completed for {analysis['symbol']} (memory block)")
             return
 
         tp_price = None
@@ -645,7 +656,6 @@ class TradingBot:
                     'time': analysis['timestamp'],
                     'trade_id': trade_id
                 })
-                
                 if ai_analyses:
                     cursor = self.trading_memory.conn.cursor()
                     for a in ai_analyses:
@@ -654,11 +664,9 @@ class TradingBot:
                             VALUES (?, ?, ?, ?)
                         ''', (trade_id, a.agent_name, a.signal, a.confidence))
                     self.trading_memory.conn.commit()
-                
                 if tf_data is not None:
                     self._save_observation(symbol, tf_data, config.ACTION_BUY, trade_id)
                 self.trailing_stops[symbol] = None
-
                 if self.telegram:
                     await self.telegram.send_trade_open({
                         'symbol': symbol,
@@ -669,6 +677,8 @@ class TradingBot:
                         'regime': regime,
                         'reasons': ', '.join(analysis['reasons'])
                     })
+            logger.info(f"Signal execution completed for {analysis['symbol']} (opened long)")
+            return
 
         elif signal == config.SIGNAL_SELL and existing_position == 0:
             fee = margin * self.TAKER_FEE
@@ -695,7 +705,6 @@ class TradingBot:
                     'time': analysis['timestamp'],
                     'trade_id': trade_id
                 })
-                
                 if ai_analyses:
                     cursor = self.trading_memory.conn.cursor()
                     for a in ai_analyses:
@@ -704,11 +713,9 @@ class TradingBot:
                             VALUES (?, ?, ?, ?)
                         ''', (trade_id, a.agent_name, a.signal, a.confidence))
                     self.trading_memory.conn.commit()
-                
                 if tf_data is not None:
                     self._save_observation(symbol, tf_data, config.ACTION_SELL, trade_id)
                 self.trailing_stops[symbol] = None
-
                 if self.telegram:
                     await self.telegram.send_trade_open({
                         'symbol': symbol,
@@ -719,6 +726,10 @@ class TradingBot:
                         'regime': regime,
                         'reasons': ', '.join(analysis['reasons'])
                     })
+            logger.info(f"Signal execution completed for {analysis['symbol']} (opened short)")
+            return
+
+        logger.info(f"Signal execution completed for {analysis['symbol']} (no action)")
 
     async def run(self):
         await self.initialize()
@@ -765,17 +776,29 @@ class TradingBot:
                         last_refresh = datetime.now()
 
                 for symbol in self.current_symbols:
+                    logger.info(f"🔹🔹🔹 TOP OF LOOP for {symbol} 🔹🔹🔹")
                     try:
+                        logger.info(f"Processing symbol: {symbol}")
                         analysis = await self.analyze_symbol(symbol)
+                        logger.info(f"✅ analyze_symbol returned for {symbol}: {analysis is not None}")
                         if analysis:
+                            logger.info(f"🔹 About to log analysis details for {symbol}")
                             logger.info(f"\n{'='*50}\nSymbol: {analysis['symbol']}\nRegime: {analysis['regime']}\nSignal: {analysis['final_signal']} ({analysis['consensus_score']:.2f})\nConfidence: {analysis['confidence']:.2%}\nPrice: ${analysis['price']:.2f}")
                             if analysis['reasons']:
                                 for r in analysis['reasons']:
                                     logger.info(f"  - {r}")
+                            logger.info(f"🔹 About to execute signal for {symbol}")
                             await self.execute_signal(analysis)
+                            logger.info(f"✅ execute_signal completed for {symbol}")
+                            logger.info(f"✅ Finished processing {symbol}")
+                        else:
+                            logger.info(f"⏭️ No analysis for {symbol}")
                     except Exception as e:
-                        logger.error(f"Error {symbol}: {e}")
+                        logger.error(f"❌ Error processing {symbol}: {e}", exc_info=True)
+                    logger.info(f"🔹 About to sleep for {symbol}")
                     await asyncio.sleep(1)
+                    logger.info(f"✅ Sleep completed for {symbol}")
+                    logger.info(f"🔹🔹🔹 BOTTOM OF LOOP for {symbol} 🔹🔹🔹")
 
                 cursor = self.trading_memory.conn.cursor()
                 cursor.execute("SELECT COUNT(*) FROM trades WHERE exit_price IS NOT NULL")
@@ -799,7 +822,6 @@ class TradingBot:
 
     async def _handle_external_close(self, symbol: str, prev_size: float):
         logger.info(f"🔔 Position on {symbol} closed externally (likely TP/SL hit)")
-
         close_price = await self.client.get_last_price(symbol)
         if close_price is None:
             try:
@@ -833,17 +855,13 @@ class TradingBot:
         if close_price is not None and trade_id is not None and entry_price is not None:
             position_type = 'long' if prev_size > 0 else 'short'
             pnl = self.calculate_pnl_with_fees(entry_price, close_price, abs(prev_size), position_type)
-
             logger.info(f"   External close - Entry: ${entry_price:.4f}, Exit: ${close_price:.4f}, Raw P&L: ${pnl['raw_pnl']:.2f}, Fees: ${pnl['fees']:.4f}, Net: ${pnl['net_pnl']:.2f}")
-
             self.trading_memory.update_outcome(symbol, close_price, pnl['net_pnl'])
-
             cursor = self.trading_memory.conn.cursor()
             cursor.execute('''
                 UPDATE training_experiences SET reward = ? WHERE trade_id = ? AND reward IS NULL
             ''', (pnl['net_pnl'], trade_id))
             self.trading_memory.conn.commit()
-
             self.trade_history.append({
                 'symbol': symbol,
                 'type': f'close_{position_type} (external)',
@@ -852,7 +870,6 @@ class TradingBot:
                 'net_pnl': pnl['net_pnl'],
                 'time': datetime.now()
             })
-
             if self.telegram:
                 await self.telegram.send_trade_notification({
                     'symbol': symbol,

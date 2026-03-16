@@ -37,16 +37,24 @@ class RabbitMQClient:
             routing_key=queue_name,
         )
 
+        logger.debug(f"Waiting for reply from {queue_name} (corr_id={correlation_id}) with timeout {timeout}s")
         try:
-            async with callback_queue.iterator() as queue_iter:
-                async for message in queue_iter:
-                    async with message.process():
-                        if message.correlation_id == correlation_id:
-                            return json.loads(message.body.decode())
+            result = await asyncio.wait_for(
+                self._wait_for_reply(callback_queue, correlation_id),
+                timeout=timeout
+            )
+            logger.debug(f"Reply received from {queue_name}")
+            return result
         except asyncio.TimeoutError:
-            logger.error(f"⏰ Timeout waiting for response for task {correlation_id}")
+            logger.error(f"⏰ Timeout waiting for response from {queue_name} (correlation_id={correlation_id})")
             return None
-        return None
+
+    async def _wait_for_reply(self, callback_queue, correlation_id):
+        async with callback_queue.iterator() as queue_iter:
+            async for message in queue_iter:
+                async with message.process():
+                    if message.correlation_id == correlation_id:
+                        return json.loads(message.body.decode())
 
     async def start_worker(self, queue_name: str, callback):
         await self.channel.set_qos(prefetch_count=1)
@@ -57,7 +65,6 @@ class RabbitMQClient:
                 async with message.process():
                     try:
                         body = json.loads(message.body.decode())
-                        # Добавляем correlation_id в тело задачи
                         body['correlation_id'] = message.correlation_id
                         logger.debug(f"📥 Received task from {queue_name} (correlation_id={message.correlation_id})")
                         result = await callback(body)

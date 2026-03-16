@@ -12,6 +12,7 @@ from ray.tune.registry import register_env
 import gymnasium as gym
 from gymnasium import spaces
 
+
 # ===== Регистрация среды (необходимо для загрузки алгоритма) =====
 class DummyTradingEnv(gym.Env):
     """Заглушка среды для загрузки алгоритма Ray."""

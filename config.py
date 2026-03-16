@@ -10,14 +10,14 @@ class Config:
         
         # ========== ВКЛЮЧАЕМ СКАНЕР ==========
         self.TRADE_TOP_VOLUME_COINS = False
-        self.TOP_COINS_COUNT = 15
+        self.TOP_COINS_COUNT = 25
         
         # ========== ИСКЛЮЧЁННЫЕ ТОКЕНЫ ==========
-        self.EXCLUDED_SYMBOLS = ["XRP/USDT", "BTC/USDT", "ETH/USDT","SOL/USDT"]
+        self.EXCLUDED_SYMBOLS = ["XRP/USDT", "BTC/USDT", "ETH/USDT", "SOL/USDT"]
         
         # ========== РУЧНОЙ СПИСОК ==========
         self.SYMBOLS = [
-            'DOGE/USDT', 'ADA/USDT', 'LINK/USDT',
+            'DOGE/USDT', 'LINK/USDT', 'ADA/USDT',
             'DOT/USDT', 'AVAX/USDT', 'NEAR/USDT', 'ATOM/USDT',
             'ALGO/USDT', 'SAND/USDT', 'MANA/USDT', 'AXS/USDT',
             'APE/USDT', 'GALA/USDT', 'ROSE/USDT', 'KSM/USDT',
@@ -39,25 +39,28 @@ class Config:
         self.MARKET_TYPE = 'linear'
         self.LEVERAGE = 3
         self.POSITION_MODE = 'one-way'
-        
+
         # Размер позиции
-        self.MAX_POSITION_SIZE_PERCENT = 20          # ⬅️ уменьшено с 30%
-        self.MIN_TRADE_AMOUNT_USDT = 5
+        self.MAX_POSITION_SIZE_PERCENT = 20
+        self.MIN_TRADE_AMOUNT_USDT = 15
         
         # Риск-менеджмент
         self.MAX_DAILY_LOSS_PERCENT = 90
         self.MIN_SIGNAL_STRENGTH = 3.0
-        self.MIN_CONFIDENCE = 0.30          # ⬅️ немного снижено (было 0.5)
 
-        # Volatility filter for indicator strategy
-        self.VOLATILITY_THRESHOLD = 0.001  # 0.1% от цены (было 0.005 = 0.5%)
+        # Порог для голосования агентов
+        self.VOTE_THRESHOLD = 0.10
+        self.MIN_CONFIDENCE = 0.20
+
+        # Фильтр волатильности
+        self.VOLATILITY_THRESHOLD = 0.002
         
-        self.TRAINING_INTERVAL_HOURS = 3  # или 24
+        self.TRAINING_INTERVAL_HOURS = 3
 
         # Параметры обучения RL
-        self.TRAINING_MIN_EXPERIENCES = 10      # минимум опытов для старта обучения
-        self.TRAINING_REPLAY_LIMIT = 2000       # размер выборки из буфера
-        self.TRAINING_TIMESTEPS = 50000         # сколько шагов обучаться за раз
+        self.TRAINING_MIN_EXPERIENCES = 10
+        self.TRAINING_REPLAY_LIMIT = 2000
+        self.TRAINING_TIMESTEPS = 50000
 
         # Симулированный баланс
         self.SIMULATED_BALANCE_USDT = 10000
@@ -69,26 +72,25 @@ class Config:
         # Режим
         self.DRY_RUN = os.getenv("DRY_RUN", "true").lower() == "true"
 
-        # ========== TP/SL Settings ==========
-        self.USE_TP_SL = True                      # включаем TP/SL (динамические)
-        self.TAKE_PROFIT_PERCENT = 0.95            # запасной вариант (если ATR не сработает)
-        self.STOP_LOSS_PERCENT = 0.51              # запасной вариант (если ATR не сработает)
-        self.USE_TRAILING_STOP = True               # ⬅️ включено
-        self.TRAILING_STOP_ACTIVATION = 1.0         # активация после 1% прибыли
-        self.TRAILING_STOP_DISTANCE = 0.5           # отступ 0.5% от максимума
+        # TP/SL Settings
+        self.USE_TP_SL = True
+        self.TAKE_PROFIT_PERCENT = 0.95
+        self.STOP_LOSS_PERCENT = 0.51
+        self.USE_TRAILING_STOP = True
+        self.TRAILING_STOP_ACTIVATION = 1.0
+        self.TRAILING_STOP_DISTANCE = 0.5
         
-        # ========== Dynamic TP/SL Settings (на основе ATR) ==========
-        self.DEFAULT_SL_MULT = 2.0                  # ⬅️ уменьшено (было 2.5)
-        self.DEFAULT_TP_MULT = 5.0                  # ⬅️ увеличено (было 4.0)
-        # ============================================================
+        # Dynamic TP/SL
+        self.DEFAULT_SL_MULT = 2.0
+        self.DEFAULT_TP_MULT = 5.0
 
-        # ========== Triangle Detector Settings ==========
+        # Triangle Detector
         self.TRIANGLE_LOOKBACK = 100
         self.TRIANGLE_MIN_TOUCHES = 3
         self.TRIANGLE_VOLUME_WINDOW = 20
         self.TRIANGLE_MAX_DEVIATION = 0.02
 
-        # ========== Action and Signal Constants ==========
+        # Action and Signal Constants
         self.ACTION_HOLD = 0
         self.ACTION_BUY = 1
         self.ACTION_SELL = 2
@@ -99,6 +101,7 @@ class Config:
         # Telegram settings
         self.TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
         self.TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
+
 config = Config()
 
 print(f"✅ Config loaded:")

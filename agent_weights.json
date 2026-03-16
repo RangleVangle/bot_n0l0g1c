@@ -1,10 +1,11 @@
 {
-  "Technical Analyst": 0.6745006464858858,
-  "Sentiment Analyst": 0.676135900546555,
-  "Risk Manager": 0.6377146076330834,
-  "RL Master": 0.6472179487880731,
-  "Triangle Scanner": 0.6495081123635824,
-  "Retest Scanner": 0.6972357839783023,
-  "On-Chain Analyst": 0.7210812010198809,
-  "News Analyst": 0.6987159434620083
+  "Technical Analyst": 0.6870586582333087,
+  "Sentiment Analyst": 0.6874502206349015,
+  "Risk Manager": 0.6862347329577256,
+  "RL Master": 0.6524100357372697,
+  "Triangle Scanner": 0.6891977353267308,
+  "Retest Scanner": 0.659376028569548,
+  "On-Chain Analyst": 0.7324033303323069,
+  "News Analyst": 0.7080725128081097,
+  "Order Flow Analyst": 0.7336793006274019
 }

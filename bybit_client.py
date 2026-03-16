@@ -88,6 +88,7 @@ class BybitClient:
         return data
 
     async def get_account_balance(self) -> dict:
+        logger.info("Entering get_account_balance")
         if config.DRY_RUN:
             return {'USDT': config.SIMULATED_BALANCE_USDT}
         if not config.BYBIT_API_KEY or not config.BYBIT_SECRET_KEY:
@@ -115,6 +116,8 @@ class BybitClient:
         except Exception as e:
             logger.error(f"Balance fetch error: {e}")
             return {'USDT': 0}
+        finally:
+            logger.info("Exiting get_account_balance")
 
     async def get_positions(self) -> Dict:
         if config.DRY_RUN:
