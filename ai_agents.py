@@ -23,6 +23,8 @@ async def close_rabbitmq():
         await _rabbitmq_client.close()
         _rabbitmq_client = None
 
+
+
 @dataclass
 class AgentAnalysis:
     agent_name: str
